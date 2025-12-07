@@ -1,0 +1,1 @@
+{'message': 'invalid input syntax for type integer: "1007.1"', 'code': '22P02', 'hint': None, 'details': None}
