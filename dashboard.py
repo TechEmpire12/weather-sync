@@ -1,18 +1,22 @@
 # dashboard.py - Enhanced with Weather Forecast Feature
 
+import os
+import requests
+from datetime import datetime, timedelta
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import os
-import requests
+
 try:
     from supabase import create_client, Client
 except ImportError:
     Client = None
     create_client = None
+
+# --- Local Modules ---
 from config import (
     DATA_ARCHIVE_FILE,
     DROUGHT_THRESHOLD,
@@ -22,13 +26,10 @@ from config import (
     API_KEY,
     AGRICULTURAL_ZONES,
     API_TIMEOUT,
-    API_TIMEOUT,
     FORECAST_API_URL,
     SUPABASE_URL,
     SUPABASE_KEY,
 )
-
-# Import seasonal crop recommendation system
 from seasonal_crops import SEASONAL_CROPS, get_current_season, get_crops_for_month, get_optimal_crops_for_month
 from crop_recommender import get_crop_recommendations, get_planting_calendar, format_recommendation_display
 from tts_utils import text_to_audio, autoplay_audio
@@ -48,7 +49,7 @@ from email_service import EmailService
 # Set page configuration
 st.set_page_config(
     layout="wide",
-    page_title="Abia State ADSS",
+    page_title="Smart-Agro Weather System",
     page_icon="🌾",
     initial_sidebar_state="expanded",
 )
@@ -332,7 +333,8 @@ def load_data():
             if response.data:
                 df_supabase = pd.DataFrame(response.data)
                 
-                # Column mapping
+                # --- DATA CLEANING STEP 1: Standardization ---
+                # Rename columns to standard Schema
                 column_map = {
                     "timestamp": "Timestamp",
                     "zone": "Zone",
@@ -426,6 +428,7 @@ def load_data():
 
     # 4. Clean and Deduplicate
     try:
+        # --- DATA CLEANING STEP 2: Unified Schema Enforcement ---
         # Ensure consistent schema before processing
         numeric_cols = [
             "T_current", "T_min", "T_max", "Humidity", 
@@ -436,10 +439,15 @@ def load_data():
             if col in df_combined.columns:
                 df_combined[col] = pd.to_numeric(df_combined[col], errors="coerce")
         
-        # Drop rows with missing critical data
+        # --- DATA CLEANING STEP 3: Handle Missing Values ---
+        # Drop rows with missing critical data (Temperature is essential for analysis)
+        original_len = len(df_combined)
         df_combined.dropna(subset=["T_min", "T_max"], inplace=True)
-        
-        # Remove duplicates (preferring local or simply latest)
+        if len(df_combined) < original_len:
+            # Log or note that rows were dropped
+            pass
+
+        # --- DATA CLEANING STEP 4: Remove Duplicates ---
         # Reset index to deduplicate by Timestamp + Zone
         df_combined.reset_index(inplace=True)
         df_combined.drop_duplicates(subset=["Timestamp", "Zone"], keep="last", inplace=True)
@@ -670,85 +678,82 @@ if "user" not in st.session_state:
     st.session_state["user"] = None
 
 # --- Authentication Flow ---
-if not st.session_state["user"]:
-    col1, col2 = st.columns([1, 2]) # Adjust layout as needed, maybe centered
-
-    with col2:
-        st.title("🌾 Abia State ADSS")
-        st.subheader("Login or Sign Up to access the dashboard.")
-        
-        auth_tab1, auth_tab2 = st.tabs(["Login", "Sign Up"])
-        
-        with auth_tab1:
-            with st.form("login_form"):
-                email = st.text_input("Email")
-                password = st.text_input("Password", type="password")
-                submit = st.form_submit_button("Login")
-                
-                if submit:
-                    result = auth.sign_in(email, password)
-                    if result.get("success"):
-                        st.session_state["user"] = result["user"]
-                        st.success("Login successful!")
-                        st.rerun()
-                    else:
-                        st.error(result.get("error"))
-        
-        with auth_tab2:
-            with st.form("signup_form"):
-                new_email = st.text_input("Email")
-                new_password = st.text_input("Password", type="password")
-                # confirm_password = st.text_input("Confirm Password", type="password") # Optional
-                submit_signup = st.form_submit_button("Sign Up")
-                
-                if submit_signup:
-                    result = auth.sign_up(new_email, new_password)
-                    if result.get("success"):
-                         st.success(result["message"])
-                    else:
-                        st.error(result.get("error"))
-
-    st.stop() # Stop execution if not logged in
+# --- Authentication Flow ---
+# Authentication is now optional for viewing data.
+# Login is handled in the sidebar for SMS/Email configuration.
 
 # --- LOGOUT BUTTON (Sidebar) ---
 with st.sidebar:
     # st.sidebar is accessible anywhere
-    st.markdown(f"**User:** {st.session_state['user'].email if hasattr(st.session_state['user'], 'email') else 'Logged In'}")
     
     with st.expander("📱 SMS & 📧 Email Alerts"):
-        # SMS
-        st.caption("SMS Setup")
-        sms_service = SMSService()
-        phone_number = st.text_input("Phone Number", key="user_phone", placeholder="234...")
-        
-        # Email
-        st.caption("Email Setup")
-        email_service = EmailService()
-        email_address = st.text_input("Email Address", key="user_email_alert", placeholder="you@example.com")
-
-        if st.button("Send Test Alerts"):
-            # Test SMS
-            if phone_number:
-                with st.spinner("Sending Test SMS..."):
-                    res = sms_service.send_alert(phone_number, "Test SMS from Abia ADSS.")
-                    if res.get("success"):
-                        st.success("✅ SMS Sent!")
-                    else:
-                        st.error(f"❌ SMS Failed: {res.get('error')}")
+        if not st.session_state.get("user"):
+            st.info("🔒 Please Login to configure alerts.")
             
-            # Test Email
-            if email_address:
-                with st.spinner("Sending Test Email..."):
-                    res = email_service.send_alert(email_address, "Test Email from Abia ADSS", "This is a test email alert.")
-                    if res.get("success"):
-                         st.success("✅ Email Sent!")
-                    else:
-                        st.error(f"❌ Email Failed: {res.get('error')}")
+            auth_tab1, auth_tab2 = st.tabs(["Login", "Sign Up"])
+            with auth_tab1:
+                with st.form("sidebar_login"):
+                    email = st.text_input("Email", key="sb_login_email")
+                    password = st.text_input("Password", type="password", key="sb_login_pass")
+                    submit = st.form_submit_button("Login")
+                    
+                    if submit:
+                        result = auth.sign_in(email, password)
+                        if result.get("success"):
+                            st.session_state["user"] = result["user"]
+                            st.success("Login successful!")
+                            st.rerun()
+                        else:
+                            st.error(result.get("error"))
+            
+            with auth_tab2:
+                with st.form("sidebar_signup"):
+                    new_email = st.text_input("Email", key="sb_signup_email")
+                    new_password = st.text_input("Password", type="password", key="sb_signup_pass")
+                    submit_signup = st.form_submit_button("Sign Up")
+                    
+                    if submit_signup:
+                        result = auth.sign_up(new_email, new_password)
+                        if result.get("success"):
+                             st.success(result["message"])
+                        else:
+                            st.error(result.get("error"))
+        else:
+            st.success(f"👤 Logged in as {st.session_state['user'].email}")
+            
+            # SMS
+            st.caption("SMS Setup")
+            sms_service = SMSService()
+            phone_number = st.text_input("Phone Number", key="user_phone", placeholder="234...")
+            
+            # Email
+            st.caption("Email Setup")
+            email_service = EmailService()
+            email_address = st.text_input("Email Address", key="user_email_alert", placeholder="you@example.com")
 
-    if st.button("Logout", key="logout_btn"):
-        auth.sign_out()
-        st.session_state["user"] = None
-        st.rerun()
+            if st.button("Send Test Alerts"):
+                # Test SMS
+                if phone_number:
+                    with st.spinner("Sending Test SMS..."):
+                        res = sms_service.send_alert(phone_number, "Test SMS from Abia ADSS.")
+                        if res.get("success"):
+                            st.success("✅ SMS Sent!")
+                        else:
+                            st.error(f"❌ SMS Failed: {res.get('error')}")
+                
+                # Test Email
+                if email_address:
+                    with st.spinner("Sending Test Email..."):
+                        res = email_service.send_alert(email_address, "Test Email from Abia ADSS", "This is a test email alert.")
+                        if res.get("success"):
+                             st.success("✅ Email Sent!")
+                        else:
+                            st.error(f"❌ Email Failed: {res.get('error')}")
+
+            if st.button("Logout", key="logout_btn"):
+                auth.sign_out()
+                st.session_state["user"] = None
+                st.rerun()
     st.markdown("---")
 
 
@@ -762,8 +767,8 @@ if df_raw.empty:
 st.markdown("""
     <style>
     .main-title {
-        font-size: 3.5rem;
-        font-weight: 800;
+        font-size: 5rem;
+        font-weight: 900;
         text-align: center;
         margin-bottom: 0.5rem;
         background: linear-gradient(135deg, #4CAF50 0%, #81C784 100%);
@@ -772,15 +777,15 @@ st.markdown("""
         background-clip: text;
     }
     .subtitle {
-        font-size: 1.3rem;
+        font-size: 2rem;
         text-align: center;
         color: #A0A0A0;
         margin-bottom: 2rem;
-        font-weight: 400;
+        font-weight: 700;
         letter-spacing: 0.5px;
     }
     </style>
-    <h1 class="main-title">🌾 Abia State Agricultural Decision Support System</h1>
+    <h1 class="main-title">🌾 Smart-Agro Weather System</h1>
     <p class="subtitle">Real-time weather analytics and crop management advisory for agricultural zones</p>
 """, unsafe_allow_html=True)
 
@@ -822,8 +827,8 @@ with col_nav2:
 with col_nav3:
     date_range = st.selectbox(
         "Select Timeframe:",
-        ["Last 7 Days", "Last 30 Days", "Last 90 Days", "All Data"],
-        index=2,
+        ["Last 24 Hours", "Last 7 Days", "Last 30 Days", "Last 90 Days", "All Data"],
+        index=3,
         key="date_range"
     )
 st.markdown("</div>", unsafe_allow_html=True)
@@ -831,7 +836,9 @@ st.markdown("</div>", unsafe_allow_html=True)
 # Filter data based on selection
 df_zone = df_raw[df_raw["Zone"] == selected_zone].copy()
 
-if date_range == "Last 7 Days":
+if date_range == "Last 24 Hours":
+    df_zone = df_zone.last("24h")
+elif date_range == "Last 7 Days":
     df_zone = df_zone.last("7D")
 elif date_range == "Last 30 Days":
     df_zone = df_zone.last("30D")
@@ -842,8 +849,7 @@ elif date_range == "Last 90 Days":
 # st.sidebar.info(...) -> Removed
 
 # Tabs
-# Tabs
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
     [
         "📊 Overview & Trends",
         "🔮 Weather Forecast",
@@ -851,8 +857,54 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         "💧 Risk Analysis",
         "🗓️ Crop Planning",
         "📁 Data Archive",
+        "🚀 Project Impact",
     ]
 )
+
+# --- TAB 7: Project Impact & Market Fit ---
+with tab7:
+    st.header("🚀 Project Impact & Market Fit")
+    st.warning("ℹ️ **Note for Evaluators:** This tab is included specifically for the funding presentation to demonstrate business viability and market fit analysis.")
+
+    col_p1, col_p2 = st.columns([2, 1])
+    
+    with col_p1:
+        st.subheader("The Problem")
+        st.markdown("""
+        **Unpredictable Weather Patterns:**
+        Climate change has made traditional farming knowledge unreliable. Farmers in Abia State face increasing risks from:
+        *   🌊 **Flooding:** Unexpected heavy rains destroying crops.
+        *   ☀️ **Droughts:** Prolonged dry spells reducing yields.
+        *   🐛 **Pest Outbreaks:** Triggered by specific temperature/humidity conditions.
+        
+        **Lack of Data:**
+        Most smallholder farmers lack access to real-time, localized hyper-local weather data to make informed decisions.
+        """)
+        
+        st.subheader("Our Solution: Data-Driven Agriculture")
+        st.markdown("""
+        The **Abia State ADSS** bridges this gap by providing:
+        1.  **Hyper-Local Monitoring:** Real-time data from specific agricultural zones (Aba, Umuahia, Bende).
+        2.  **Actionable Insights:** Not just raw data, but advice (e.g., "Spray now", "Delay planting").
+        3.  **Multi-Channel Alerts:** Reaching farmers where they are—via **SMS** and **App notifications**.
+        """)
+        
+    with col_p2:
+        st.info("💡 **Target Market:**\n\nSmallholder farmers, Cooperative societies, and Government Agricultural Extension workers.")
+        
+        st.metric("Potential Users", "150,000+", "Abia State Farmers")
+        st.metric("Yield Improvement", "20-30%", "Estimated")
+        
+    st.markdown("---")
+    st.subheader("Technical Architecture")
+    st.code("""
+    [Sensors/API] --> [Data Collector] --> [Supabase Cloud DB] 
+                                              |
+                                              v
+                                      [Streamlit Analytics Engine]
+                                              |
+    [Web Dashboard] <---- [Processing] ----> [SMS/Email Alerts]
+    """, language="text")
 
 # --- TAB 1: Overview & Trends (Logic is complete) ---
 with tab1:
@@ -2021,6 +2073,7 @@ with tab5:
                     st.write(f"🌱 Soil: {rec['soil_type']}")
                     st.write(f"📅 Growing: {rec['growing_days']} days")
                     st.write(f"� Harvest: {rec['expected_harvest']}")
+                    st.write(f"🚜 **Recommended Planting Date:** {rec.get('smart_planting_date', 'N/A')}")
                     st.write(f"🗓️ Best Planting: {rec['optimal_planting_text']}")
                 
                 st.caption(f"ℹ️ {rec['description']}")
@@ -2045,6 +2098,7 @@ with tab5:
                     st.write(f"🌱 {rec['soil_type']}")
                     st.write(f"📅 {rec['growing_days']} days")
                     st.write(f"� {rec['expected_harvest']}")
+                    st.write(f"🚜 **Recommended Planting Date:** {rec.get('smart_planting_date', 'N/A')}")
                     st.write(f"🗓️ Best Plant: {rec['optimal_planting_text']}")
     
     # Moderately Suitable
