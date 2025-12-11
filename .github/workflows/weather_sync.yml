@@ -8,6 +8,7 @@ on:
 
 jobs:
   collect-and-sync:
+    runs-on: ubuntu-latest
     permissions:
       contents: write
 
