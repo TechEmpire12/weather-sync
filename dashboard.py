@@ -189,7 +189,7 @@ st.markdown(
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def fetch_hourly_forecast(zone_name):
-    """Fetch hourly forecast for next 48 hours using OpenWeatherMap API."""
+    """Fetch 3-hourly forecast for next 5 days (120 hours) but return relevant slice."""
     try:
         coords = AGRICULTURAL_ZONES[zone_name]
         url = FORECAST_API_URL # Use the URL from config.py
@@ -206,10 +206,19 @@ def fetch_hourly_forecast(zone_name):
         data = response.json()
         
         forecast_list = []
-        # Get first 8 entries for 24 hours (3-hour intervals) or more for 48 hours
+        # Logic: OpenWeatherMap 5-day/3-hour forecast returns 40 items.
+        # We want the next 48 hours for the chart. 48 hours / 3 hours = 16 items.
+        
+        # TIMEZONE CORRECTION: Adjust UTC timestamps to WAT (UTC+1) for display
+        # Simplified handling without external pytz dependency
+        offset = timedelta(hours=1) 
+
         for item in data["list"][:16]:  
+            dt_utc = datetime.fromtimestamp(item["dt"])
+            dt_local = dt_utc + offset
+
             forecast_list.append({
-                "datetime": datetime.fromtimestamp(item["dt"]),
+                "datetime": dt_local,
                 "temp": item["main"]["temp"],
                 "feels_like": item["main"]["feels_like"],
                 "humidity": item["main"]["humidity"],
@@ -250,9 +259,14 @@ def fetch_daily_forecast(zone_name):
         
         # Aggregate by day
         daily_data = {}
+        
+        # TIMEZONE CORRECTION: Adjust UTC timestamps to WAT (UTC+1) for accurate daily bins
+        offset = timedelta(hours=1)
+        
         for item in data["list"]:
-            dt = datetime.fromtimestamp(item["dt"])
-            date_key = dt.date()
+            dt_utc = datetime.fromtimestamp(item["dt"])
+            dt_local = dt_utc + offset
+            date_key = dt_local.date()
             
             if date_key not in daily_data:
                 daily_data[date_key] = {
@@ -262,6 +276,7 @@ def fetch_daily_forecast(zone_name):
                     "rain": 0,
                     "wind_speed": [],
                     "clouds": [],
+                    "pops": [], # NEW: Probability of precipitation
                 }
             
             daily_data[date_key]["temps"].append(item["main"]["temp"])
@@ -270,13 +285,29 @@ def fetch_daily_forecast(zone_name):
             daily_data[date_key]["rain"] += item.get("rain", {}).get("3h", 0.0)
             daily_data[date_key]["wind_speed"].append(item["wind"]["speed"])
             daily_data[date_key]["clouds"].append(item["clouds"]["all"])
+            daily_data[date_key]["pops"].append(item.get("pop", 0) * 100) # NEW
         
         # Create daily forecast dataframe
         forecast_list = []
         for date_key, values in sorted(daily_data.items()):
             # Find the most frequent weather condition for the day
             most_frequent_weather = max(set(values["weather"]), key=values["weather"].count)
-            # Find the most relevant description (can be complex, but sticking to main weather for simplicity)
+            total_rain = values["rain"]
+            max_pop = max(values["pops"]) if values["pops"] else 0
+            
+            # --- LOGIC CORRECTION: Reduce False Positive Rain ---
+            # If labelled "Rain" but total volume is negligible (< 0.5mm), downgrade it.
+            if most_frequent_weather == "Rain":
+                if total_rain < 0.2: 
+                     # Very dry, likely just passing clouds or high probability but low volume
+                     most_frequent_weather = "Clouds" 
+                elif total_rain < 0.5:
+                     # Minimal rain, call it Drizzle
+                     most_frequent_weather = "Drizzle"
+            
+            # Conversely, if "Clouds" but High Rain Volume, upgrade it (rare case but possible)
+            if most_frequent_weather == "Clouds" and total_rain > 2.0:
+                most_frequent_weather = "Rain"
             
             forecast_list.append({
                 "date": date_key,
@@ -284,9 +315,10 @@ def fetch_daily_forecast(zone_name):
                 "temp_min": min(values["temps"]),
                 "humidity": np.mean(values["humidity"]),
                 "weather": most_frequent_weather,
-                "total_rain": values["rain"],
+                "total_rain": total_rain,
                 "wind_speed": np.mean(values["wind_speed"]),
                 "clouds": np.mean(values["clouds"]),
+                "max_pop": max_pop,
             })
         
         return pd.DataFrame(forecast_list)
@@ -1356,7 +1388,7 @@ with tab1:
 with tab2:
     st.header(f"🔮 Weather Forecast for {selected_zone}")
     
-    st.info("👨‍🌾 **What This Shows:** Weather predictions for the next 2 days (hourly) and 5 days (daily). Use this to plan farm work like planting, spraying pesticides, or harvesting. Avoid spraying before rain!")
+    st.info("👨‍🌾 **What This Shows:** Weather predictions for the next 2 days (3-hour intervals) and 5 days (daily). Use this to plan farm work like planting, spraying pesticides, or harvesting. Avoid spraying before rain!")
     
     # Fetch forecast data
     with st.spinner("Fetching forecast data..."):
@@ -1365,11 +1397,12 @@ with tab2:
     
     if not df_hourly.empty or not df_daily.empty:
         # Create two columns for hourly and daily forecast
-        col_left, col_right = st.columns([1, 1])
+        # Create two columns for hourly and daily forecast
+        col_left, col_right = st.columns([2, 1])
         
         # --- Hourly Forecast ---
         with col_left:
-            st.subheader("⏰ Hourly Forecast (Next 48 Hours)")
+            st.subheader("⏰ 3-Hourly Forecast (Next 48 Hours)")
             if st.button("🔊 Listen to Hourly Forecast"):
                  forecast_text = generate_hourly_forecast_summary(df_hourly)
                  autoplay_audio(text_to_audio(forecast_text))
@@ -1410,9 +1443,18 @@ with tab2:
                         overlaying="y",
                         side="right",
                         range=[0, 100],
+                        showgrid=False,
+                    ),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
                     ),
                     hovermode="x unified",
                     height=400,
+                    margin=dict(l=50, r=50, t=80, b=50),
                 )
                 
                 st.plotly_chart(fig_hourly, use_container_width=True)
@@ -1428,7 +1470,7 @@ with tab2:
                 wind_row = "".join([f'<div class="hourly-table-cell">{wind:.1f}m/s</div>' for wind in hourly_display["wind_speed"]])
                 
                 st.markdown("---")
-                st.markdown(f"**Hourly Details** (Next 24 Hours)")
+                st.markdown(f"**Detailed 3-Hourly View** (Next 24 Hours)")
                 
                 st.markdown(f'<div class="hourly-table-container">{time_row}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="hourly-table-container" style="color: #FF6B6B;">{temp_row}</div>', unsafe_allow_html=True)
@@ -1447,12 +1489,18 @@ with tab2:
             
             if not df_daily.empty:
                 # Display daily forecast cards
+                # Display daily forecast cards
                 for idx, row in df_daily.iterrows():
                     date_str = row["date"].strftime("%a, %b %d")
                     emoji = get_weather_emoji(row["weather"])
                     weather_desc = row["weather"].replace(" ", " ").title() # Clean up weather name
                     
                     # Custom HTML for a cleaner daily card matching the screenshot style
+                    # Add Chance of rain if significant
+                    pop_badge = ""
+                    if row.get("max_pop", 0) > 20: 
+                        pop_badge = f'<span style="background-color: #e3f2fd; color: #1565c0; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 5px;">💧 {row["max_pop"]:.0f}%</span>'
+
                     st.markdown(f"""
                         <div class="forecast-card">
                             <div style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem;">
@@ -1461,8 +1509,8 @@ with tab2:
                                 <strong style="width: 35%; text-align: right;">{row["temp_max"]:.0f}° / {row["temp_min"]:.0f}°C</strong>
                                 <div style="color: #666; width: 20%; text-align: right; font-size: 0.9rem;">{weather_desc}</div>
                             </div>
-                            <div style="font-size: 0.8rem; color: #999; text-align: right;">
-                                Rain: {row["total_rain"]:.1f} mm | Wind: {row["wind_speed"]:.1f} m/s
+                            <div style="font-size: 0.8rem; color: #999; text-align: right; display: flex; justify-content: flex-end; align-items: center;">
+                                <span>Rain: {row["total_rain"]:.1f} mm {pop_badge} | Wind: {row["wind_speed"]:.1f} m/s</span>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
