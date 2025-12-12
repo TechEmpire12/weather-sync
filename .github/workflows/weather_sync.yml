@@ -31,6 +31,8 @@ jobs:
         OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        TERMII_API_KEY: ${{ secrets.TERMII_API_KEY }}
+        TERMII_SENDER_ID: ${{ secrets.TERMII_SENDER_ID }}
       run: python data_collector.py --run-once
 
     - name: Commit and Push Changes

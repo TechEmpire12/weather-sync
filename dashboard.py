@@ -910,7 +910,14 @@ with col_nav3:
 st.markdown("</div>", unsafe_allow_html=True)
 
 # Filter data based on selection
+# Filter data based on selection
 df_zone = df_raw[df_raw["Zone"] == selected_zone].copy()
+
+# Ensure Index is DatetimeIndex for .last() method
+if not isinstance(df_zone.index, pd.DatetimeIndex):
+    df_zone.index = pd.to_datetime(df_zone.index)
+
+df_zone.sort_index(inplace=True)
 
 if date_range == "Last 24 Hours":
     df_zone = df_zone.last("24h")
@@ -1008,15 +1015,18 @@ with tab1:
                 autoplay_audio(audio)
         
         with col_sms:
-            if st.button("📱 SMS Summary"):
-                phone = st.session_state.get("user_phone")
-                if not phone:
-                     st.error("Set phone in Sidebar.")
+            # Allow direct input for better UX
+            default_phone = st.session_state.get("user_phone", "")
+            dest_phone = st.text_input("Enter Phone", value=default_phone, placeholder="234...", key="sms_dest_input", label_visibility="collapsed")
+            
+            if st.button("📱 Send SMS"):
+                if not dest_phone:
+                     st.error("Enter phone number.")
                 else:
                     with st.spinner("Sending SMS..."):
                         sms_msg = get_summary()
                         sms_svc = SMSService()
-                        res = sms_svc.send_alert(phone, sms_msg)
+                        res = sms_svc.send_alert(dest_phone, sms_msg)
                         if res.get("success"):
                             st.success("✅ SMS Sent!")
                         else:
@@ -1219,7 +1229,7 @@ with tab1:
         
         with col_w1:
             # Wind Rose (Polar Scatter of recent 24h)
-            st.markdown("**Wind Direction (Last 24h)**")
+            st.markdown(f"**Wind Direction (Last 24h) - {selected_zone}**")
             
             # Filter last 24h
             df_wind = df_zone.tail(24)
@@ -1245,18 +1255,54 @@ with tab1:
                     angularaxis=dict(direction="clockwise")
                 ),
                 showlegend=False,
-                height=350,
-                margin=dict(l=40, r=40, t=20, b=20)
+                height=400,
+                margin=dict(l=40, r=40, t=30, b=30)
             )
             st.plotly_chart(fig_wind, use_container_width=True)
 
         with col_w2:
-            # Pressure Trend
-            st.markdown("**Atmospheric Pressure Trend**")
-            fig_press = px.line(df_zone.tail(24), x=df_zone.tail(24).index, y="Pressure", markers=True)
-            fig_press.update_traces(line_color="#4FC3F7")
-            fig_press.update_layout(height=350, xaxis_title="Time", yaxis_title="hPa")
-            st.plotly_chart(fig_press, use_container_width=True)
+            # Zone Map Visualization
+            st.markdown("**📍 Forecast Locations (Abia State)**")
+            
+            # Prepare map data
+            map_data = []
+            for zone, coords in AGRICULTURAL_ZONES.items():
+                # Highlight selected zone with a slightly different color/size if possible (st.map is simple)
+                # For basic st.map, we just plot all points.
+                map_data.append({
+                    "lat": coords["lat"],
+                    "lon": coords["lon"],
+                    "zone": zone,
+                    "size": 20 if zone == selected_zone else 10,
+                    "color": "#FF0000" if zone == selected_zone else "#0000FF" # Simple color diff logic
+                })
+            df_map = pd.DataFrame(map_data)
+            
+            # Display map
+            # Using st.map is the simplest way to get a nice OSM/Mapbox style interactive map
+            st.map(df_map, latitude="lat", longitude="lon", size="size", color="color", zoom=9, height=400)
+            
+        # Contextual Insight on Map + Wind
+        with st.expander("💡 Insights: Why compare Wind Direction with Location?"):
+            st.markdown("""
+            **Combining these two charts helps predict upcoming weather:**
+            
+            1.  **Geography Matters:** The map shows **Aba** is further South (closer to the Atlantic Ocean), while **Umuahia/Isuikwuato** are further North.
+            2.  **Wind Source:** The Wind Rose (Left) shows where the wind is blowing **FROM**.
+            3.  **The Connection in Abia State:**
+                -   **South-West Winds (SW):** Blow from the **Atlantic Ocean**. They usually bring **Moisture and Rain**.
+                -   **North-East Winds (NE):** Blow from the **Sahara Desert** (Harmattan). They usually bring **Dryness and Dust**.
+            
+            *Tip: If you see the Wind Rose pointing SW and you are in Aba, expect humid conditions. If it shifts to NE, expect dry air.*
+            """)
+
+        # Pressure Trend (Moved to full width below)
+        st.markdown("---")
+        st.markdown("**Atmospheric Pressure Trend**")
+        fig_press = px.line(df_zone.tail(24), x=df_zone.tail(24).index, y="Pressure", markers=True)
+        fig_press.update_traces(line_color="#4FC3F7")
+        fig_press.update_layout(height=350, xaxis_title="Time", yaxis_title="hPa")
+        st.plotly_chart(fig_press, use_container_width=True)
         
         # Add detailed analysis below the charts
         st.markdown("---")
@@ -1682,6 +1728,12 @@ with tab3:
     
     # Use full dataset for historical trends, ignoring the sidebar date filter
     df_history = df_raw[df_raw["Zone"] == selected_zone].copy()
+    
+    # Ensure Index is DatetimeIndex for resampling
+    if not isinstance(df_history.index, pd.DatetimeIndex):
+        df_history.index = pd.to_datetime(df_history.index)
+    
+    df_history.sort_index(inplace=True)
     
     if df_history.empty:
         st.warning("Insufficient data for trend analysis.")
