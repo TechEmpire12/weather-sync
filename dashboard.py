@@ -187,6 +187,51 @@ st.markdown(
 
 # --- Utility Functions ---
 
+@st.cache_data(ttl=600)  # Cache current weather for 10 minutes to avoid hitting rate limits too hard
+def fetch_current_weather(zone_name):
+    """Fetch real-time current weather from OpenWeatherMap API."""
+    try:
+        coords = AGRICULTURAL_ZONES[zone_name]
+        url = WEATHER_API_URL # Use the URL from config.py - assumes standard current weather endpoint
+        # Fallback if WEATHER_API_URL is the forecast one or not imported correctly, though it should be.
+        # Ideally import WEATHER_API_URL from config or hardcode the standard one if needed.
+        # Based on config.py it should be available. Let's start by using a direct URL to be safe or re-use existing import if present.
+        # Checking imports... "from config import ..."
+        
+        # We need to make sure WEATHER_API_URL is imported or defined.
+        # It was imported in data_collector.py but maybe not dashboard.py?
+        # Let's assume standard OWM current weather URL just in case:
+        base_url = "https://api.openweathermap.org/data/2.5/weather"
+        
+        params = {
+            "lat": coords["lat"],
+            "lon": coords["lon"],
+            "appid": API_KEY,
+            "units": "metric",
+        }
+        
+        response = requests.get(base_url, params=params, timeout=API_TIMEOUT)
+        response.raise_for_status()
+        data = response.json()
+        
+        return {
+            "temp": data["main"]["temp"],
+            "humidity": data["main"]["humidity"],
+            "pressure": data["main"]["pressure"],
+            "wind_speed": data["wind"]["speed"],
+            "wind_deg": data["wind"]["deg"], # Direction
+            "rain_1h": data.get("rain", {}).get("1h", 0.0),
+            "description": data["weather"][0]["description"],
+            "icon": data["weather"][0]["icon"],
+            "timestamp": datetime.now() # Mark as retrieved now
+        }
+    
+    except Exception as e:
+        # Fail silently to fallback, but maybe log to console
+        print(f"Error fetching live weather: {e}")
+        return None
+
+
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def fetch_hourly_forecast(zone_name):
     """Fetch 3-hourly forecast for next 5 days (120 hours) but return relevant slice."""
@@ -1031,6 +1076,9 @@ with tab1:
                             st.success("✅ SMS Sent!")
                         else:
                             st.error(f"❌ SMS Failed: {res.get('error')}")
+                            # Add debug expander
+                            with st.expander("Debug details"):
+                                st.write(res)
 
         with col_email:
              if st.button("📧 Email Summary"):
@@ -1052,383 +1100,422 @@ with tab1:
                             st.error(f"❌ Email Failed: {res.get('error')}")
 
     if df_zone.empty:
-        st.warning("No data available for the selected zone and timeframe.")
+        st.warning("No historical data available for the selected zone and timeframe. Fetching live data...")
+        # Fallback to live data only if df is empty logic can be handled below
+    
+    # --- LIVE DATA FETCH ---
+    live_weather = fetch_current_weather(selected_zone)
+    
+    use_live = False
+    if live_weather:
+        use_live = True
+        # st.toast(f"🟢 Utilizing Real-Time Live Data for {selected_zone}", icon="📡") # Optional UX touch
     else:
-        # Latest conditions
-        latest = df_zone.iloc[-1]
+        # If live fetch fails, fallback to latest CSV/DB data
+        if not df_zone.empty:
+            latest = df_zone.iloc[-1]
+        else:
+            st.error("Could not fetch live data and no historical data found.")
+            st.stop()
 
-        col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = st.columns(4)
 
-        with col1:
+    with col1:
+        if use_live:
+            temp_current = live_weather['temp']
+            # Calculate delta against historical average if available
+            avg_temp = df_zone['T_current'].mean() if not df_zone.empty else temp_current
+            delta_val = f"{temp_current - avg_temp:.1f}°C vs hist avg"
+            metric_label = "🌡️ Current Temp (Live)"
+        else:
+            # Fallback
+            latest = df_zone.iloc[-1]
             temp_current = latest['T_current']
-            st.metric(
-                "🌡️ Current Temperature",
-                f"{temp_current:.1f} °C",
-                delta=f"{temp_current - df_zone['T_current'].mean():.1f}°C vs avg",
-            )
-            # Dynamic explanation based on temperature value
-            if temp_current > 35:
-                st.warning("⚠️ **Very hot!** Heat stress risk for crops. Increase watering and provide shade if possible.")
-            elif temp_current > 30:
-                st.info("☀️ **Hot weather.** Good for heat-loving crops. Ensure adequate irrigation.")
-            elif temp_current >= 20:
-                st.success("✅ **Ideal temperature** for most crops. Good growing conditions.")
-            elif temp_current >= 15:
-                st.info("🌤️ **Mild weather.** Suitable for cool-season crops.")
-            else:
-                st.warning("❄️ **Cold weather.** Risk of frost damage. Protect sensitive crops.")
+            delta_val = f"{temp_current - df_zone['T_current'].mean():.1f}°C vs avg"
+            metric_label = "🌡️ Current Temperature"
 
-        with col2:
+        st.metric(
+            metric_label,
+            f"{temp_current:.1f} °C",
+            delta=delta_val,
+        )
+        # Dynamic explanation based on temperature value
+        if temp_current > 35:
+            st.warning("⚠️ **Very hot!** Heat stress risk for crops. Increase watering and provide shade if possible.")
+        elif temp_current > 30:
+            st.info("☀️ **Hot weather.** Good for heat-loving crops. Ensure adequate irrigation.")
+        elif temp_current >= 20:
+            st.success("✅ **Ideal temperature** for most crops. Good growing conditions.")
+        elif temp_current >= 15:
+            st.info("🌤️ **Mild weather.** Suitable for cool-season crops.")
+        else:
+            st.warning("❄️ **Cold weather.** Risk of frost damage. Protect sensitive crops.")
+
+    with col2:
+        if use_live:
+            humidity = live_weather['humidity']
+            st.metric("💧 Humidity (Live)", f"{humidity:.0f}%")
+        else:
             humidity = latest['Humidity']
             st.metric("💧 Humidity", f"{humidity:.0f}%")
-            # Dynamic explanation based on humidity value
-            if humidity > 80:
-                st.warning("⚠️ **High humidity.** Increased risk of fungal diseases. Improve air circulation.")
-            elif humidity >= 60:
-                st.success("✅ **Good humidity** for most crops. Comfortable growing conditions.")
-            elif humidity >= 40:
-                st.info("🌤️ **Moderate humidity.** Monitor soil moisture regularly.")
-            else:
-                st.warning("🏜️ **Low humidity.** Plants may need more frequent watering.")
+        # Dynamic explanation based on humidity value
+        if humidity > 80:
+            st.warning("⚠️ **High humidity.** Increased risk of fungal diseases. Improve air circulation.")
+        elif humidity >= 60:
+            st.success("✅ **Good humidity** for most crops. Comfortable growing conditions.")
+        elif humidity >= 40:
+            st.info("🌤️ **Moderate humidity.** Monitor soil moisture regularly.")
+        else:
+            st.warning("🏜️ **Low humidity.** Plants may need more frequent watering.")
 
-        with col3:
+    with col3:
+        if use_live:
+            rain_value = live_weather['rain_1h']
+            st.metric("🌧️ Rain (Last 1h)", f"{rain_value:.1f} mm")
+        else:
             rain_value = latest.get("Precipitation_1h", 0.0)
             st.metric("🌧️ Last Hour Rain", f"{rain_value:.1f} mm")
-            # Dynamic explanation based on rainfall
-            if rain_value > 10:
-                st.warning("🌧️ **Heavy rain!** Delay field work. Check for waterlogging.")
-            elif rain_value > 2:
-                st.info("🌦️ **Moderate rain.** Good for crops. Avoid spraying pesticides.")
-            elif rain_value > 0:
-                st.success("💧 **Light rain.** Beneficial for crops. Reduces irrigation needs.")
+        # Dynamic explanation based on rainfall
+        if rain_value > 10:
+            st.warning("🌧️ **Heavy rain!** Delay field work. Check for waterlogging.")
+        elif rain_value > 2:
+            st.info("🌦️ **Moderate rain.** Good for crops. Avoid spraying pesticides.")
+        elif rain_value > 0:
+            st.success("💧 **Light rain.** Beneficial for crops. Reduces irrigation needs.")
+        else:
+            # Check recent rainfall pattern
+            recent_rain = df_zone.tail(24)["Precipitation_1h"].sum()
+            if recent_rain < 1:
+                st.info("☀️ **No recent rain.** Monitor soil moisture and irrigate if needed.")
             else:
-                # Check recent rainfall pattern
-                recent_rain = df_zone.tail(24)["Precipitation_1h"].sum()
-                if recent_rain < 1:
-                    st.info("☀️ **No recent rain.** Monitor soil moisture and irrigate if needed.")
-                else:
-                    st.success("✅ **Dry now** but recent rain was good. Soil should have moisture.")
+                st.success("✅ **Dry now** but recent rain was good. Soil should have moisture.")
 
-        with col4:
-            if "Wind_Speed" in latest:
-                wind_speed = latest['Wind_Speed']
-                st.metric("💨 Wind Speed", f"{wind_speed:.1f} m/s")
-                # Dynamic explanation based on wind speed
-                if wind_speed > 10:
-                    st.error("🌪️ **Very windy!** Risk of crop damage. Avoid spraying. Secure structures.")
-                elif wind_speed > 5:
-                    st.warning("💨 **Windy conditions.** Not ideal for spraying pesticides.")
-                elif wind_speed > 2:
-                    st.success("🍃 **Gentle breeze.** Good air circulation for crops.")
-                else:
-                    st.info("😌 **Calm conditions.** Good for spraying and field work.")
-
-        st.markdown("---")
-
-        # Statistics
-        stats = calculate_statistics(df_zone)
-
-        if stats:
-            st.subheader("📈 Statistical Summary")
-            if st.button("🔊 Listen to Stats"):
-                 stats_text = f"Statistical Summary. Average temperature is {stats['avg_temp']:.1f} degrees. Maximum reached {stats['max_temp']:.1f} degrees. Total rain in last 30 days is {stats['total_rain_30d']:.1f} millimeters."
-                 autoplay_audio(text_to_audio(stats_text))
-
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                st.markdown("**Temperature Statistics**")
-                st.write(f"Average: {stats['avg_temp']:.1f}°C")
-                st.write(f"Maximum: {stats['max_temp']:.1f}°C")
-                st.write(f"Minimum: {stats['min_temp']:.1f}°C")
-
-            with col2:
-                st.markdown("**Rainfall Summary**")
-                rain_30d = stats['total_rain_30d']
-                st.write(f"Last 30 days: {rain_30d:.1f} mm")
-                st.write(f"Last 90 days: {stats['total_rain_90d']:.1f} mm")
-                st.write(f"Daily average: {stats['avg_daily_rain']:.1f} mm")
-                
-                # Dynamic explanation based on 30-day rainfall
-                if rain_30d < 50:
-                    st.warning("⚠️ **Low rainfall** in past month. Increase irrigation frequency.")
-                elif rain_30d < 100:
-                    st.info("💧 **Below average rain.** Monitor soil moisture and irrigate as needed.")
-                elif rain_30d <= 200:
-                    st.success("✅ **Good rainfall** for most crops. Soil moisture should be adequate.")
-                else:
-                    st.warning("🌧️ **Heavy rainfall.** Watch for waterlogging and drainage issues.")
-
-            with col3:
-                st.markdown("**Other Metrics**")
-                st.write(f"Avg Humidity: {stats['avg_humidity']:.1f}%")
-
-        # Temperature trend
-        st.subheader("🌡️ Temperature Trends")
-        if st.button("🔊 Listen to Trends"):
-             trend_text = generate_temp_trend_summary(df_zone)
-             autoplay_audio(text_to_audio(trend_text))
+    with col4:
+        if use_live:
+            wind_speed = live_weather['wind_speed']
+            st.metric("💨 Wind Speed (Live)", f"{wind_speed:.1f} m/s")
+        elif "Wind_Speed" in latest:
+            wind_speed = latest['Wind_Speed']
+            st.metric("💨 Wind Speed", f"{wind_speed:.1f} m/s")
+        else:
+            wind_speed = 0 # Default if missing in historical
         
-        with st.expander("ℹ️ How to Read This Chart"):
-            st.write("""
-            **What it shows:** Daily high (red), current (orange), and low (blue) temperatures over time.
-            
-            **How to use it:**
-            - **Red line (Max):** Highest temperature each day - important for heat stress on crops
-            - **Blue line (Min):** Lowest temperature each day - watch for cold that might damage crops
-            - **Orange line (Current):** Average temperature - shows overall temperature patterns
-            
-            **For farming:** Use this to spot temperature patterns and plan activities like planting or protecting crops from extreme heat or cold.
-            """)
+        # Dynamic explanation based on wind speed
+        if wind_speed > 10:
+            st.error("🌪️ **Very windy!** Risk of crop damage. Avoid spraying. Secure structures.")
+        elif wind_speed > 5:
+            st.warning("💨 **Windy conditions.** Not ideal for spraying pesticides.")
+        elif wind_speed > 2:
+            st.success("🍃 **Gentle breeze.** Good air circulation for crops.")
+        else:
+            st.info("😌 **Calm conditions.** Good for spraying and field work.")
 
-        fig_temp = go.Figure()
-        fig_temp.add_trace(
-            go.Scatter(
-                x=df_zone.index,
-                y=df_zone["T_max"],
-                name="T_max",
-                line=dict(color="red"),
-                hovertemplate="Max T: %{y:.1f}°C<extra></extra>",
-            )
+    st.markdown("---")
+
+    # Statistics
+    stats = calculate_statistics(df_zone)
+
+    if stats:
+        st.subheader("📈 Statistical Summary")
+        if st.button("🔊 Listen to Stats"):
+             stats_text = f"Statistical Summary. Average temperature is {stats['avg_temp']:.1f} degrees. Maximum reached {stats['max_temp']:.1f} degrees. Total rain in last 30 days is {stats['total_rain_30d']:.1f} millimeters."
+             autoplay_audio(text_to_audio(stats_text))
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown("**Temperature Statistics**")
+            st.write(f"Average: {stats['avg_temp']:.1f}°C")
+            st.write(f"Maximum: {stats['max_temp']:.1f}°C")
+            st.write(f"Minimum: {stats['min_temp']:.1f}°C")
+
+        with col2:
+            st.markdown("**Rainfall Summary**")
+            rain_30d = stats['total_rain_30d']
+            st.write(f"Last 30 days: {rain_30d:.1f} mm")
+            st.write(f"Last 90 days: {stats['total_rain_90d']:.1f} mm")
+            st.write(f"Daily average: {stats['avg_daily_rain']:.1f} mm")
+            
+            # Dynamic explanation based on 30-day rainfall
+            if rain_30d < 50:
+                st.warning("⚠️ **Low rainfall** in past month. Increase irrigation frequency.")
+            elif rain_30d < 100:
+                st.info("💧 **Below average rain.** Monitor soil moisture and irrigate as needed.")
+            elif rain_30d <= 200:
+                st.success("✅ **Good rainfall** for most crops. Soil moisture should be adequate.")
+            else:
+                st.warning("🌧️ **Heavy rainfall.** Watch for waterlogging and drainage issues.")
+
+        with col3:
+            st.markdown("**Other Metrics**")
+            st.write(f"Avg Humidity: {stats['avg_humidity']:.1f}%")
+
+    # Temperature trend
+    st.subheader("🌡️ Temperature Trends")
+    if st.button("🔊 Listen to Trends"):
+         trend_text = generate_temp_trend_summary(df_zone)
+         autoplay_audio(text_to_audio(trend_text))
+    
+    with st.expander("ℹ️ How to Read This Chart"):
+        st.write("""
+        **What it shows:** Daily high (red), current (orange), and low (blue) temperatures over time.
+        
+        **How to use it:**
+        - **Red line (Max):** Highest temperature each day - important for heat stress on crops
+        - **Blue line (Min):** Lowest temperature each day - watch for cold that might damage crops
+        - **Orange line (Current):** Average temperature - shows overall temperature patterns
+        
+        **For farming:** Use this to spot temperature patterns and plan activities like planting or protecting crops from extreme heat or cold.
+        """)
+
+    fig_temp = go.Figure()
+    fig_temp.add_trace(
+        go.Scatter(
+            x=df_zone.index,
+            y=df_zone["T_max"],
+            name="T_max",
+            line=dict(color="red"),
+            hovertemplate="Max T: %{y:.1f}°C<extra></extra>",
         )
-        fig_temp.add_trace(
-            go.Scatter(
-                x=df_zone.index,
-                y=df_zone["T_current"],
-                name="T_current",
-                line=dict(color="orange"),
-                hovertemplate="Current T: %{y:.1f}°C<extra></extra>",
-            )
+    )
+    fig_temp.add_trace(
+        go.Scatter(
+            x=df_zone.index,
+            y=df_zone["T_current"],
+            name="T_current",
+            line=dict(color="orange"),
+            hovertemplate="Current T: %{y:.1f}°C<extra></extra>",
         )
-        fig_temp.add_trace(
-            go.Scatter(
-                x=df_zone.index,
-                y=df_zone["T_min"],
-                name="T_min",
-                line=dict(color="blue"),
-                hovertemplate="Min T: %{y:.1f}°C<extra></extra>",
-            )
+    )
+    fig_temp.add_trace(
+        go.Scatter(
+            x=df_zone.index,
+            y=df_zone["T_min"],
+            name="T_min",
+            line=dict(color="blue"),
+            hovertemplate="Min T: %{y:.1f}°C<extra></extra>",
         )
+    )
 
-        fig_temp.update_layout(
-            title="Temperature Variations",
-            xaxis_title="Date",
-            yaxis_title="Temperature (°C)",
-            hovermode="x unified",
+    fig_temp.update_layout(
+        title="Temperature Variations",
+        xaxis_title="Date",
+        yaxis_title="Temperature (°C)",
+        hovermode="x unified",
+    )
+
+    st.plotly_chart(fig_temp, use_container_width=True)
+
+    # Wind & Pressure Analysis
+    st.subheader("🌬️ Wind & Atmosphere Analysis")
+    if st.button("🔊 Listen to Wind Analysis"):
+         wind_text = generate_wind_summary(df_zone)
+         autoplay_audio(text_to_audio(wind_text))
+    st.caption("💡 Wind direction and pressure help predict upcoming weather changes. Falling pressure often means rain is coming.")
+    col_w1, col_w2 = st.columns(2)
+    
+    with col_w1:
+        # Wind Rose (Polar Scatter of recent 24h)
+        st.markdown(f"**Wind Direction (Last 24h) - {selected_zone}**")
+        
+        # Filter last 24h
+        df_wind = df_zone.tail(24)
+        
+        fig_wind = go.Figure()
+        fig_wind.add_trace(go.Scatterpolar(
+            r=df_wind["Wind_Speed"],
+            theta=df_wind["Wind_Direction"],
+            mode='markers',
+            marker=dict(
+                color=df_wind["Wind_Speed"],
+                colorscale='Viridis',
+                size=10,
+                showscale=True,
+                colorbar=dict(title="Speed (m/s)")
+            ),
+            name='Wind'
+        ))
+        
+        fig_wind.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, df_wind["Wind_Speed"].max() + 2]),
+                angularaxis=dict(direction="clockwise")
+            ),
+            showlegend=False,
+            height=400,
+            margin=dict(l=40, r=40, t=30, b=30)
         )
+        st.plotly_chart(fig_wind, use_container_width=True)
 
-        st.plotly_chart(fig_temp, use_container_width=True)
+    with col_w2:
+        # Zone Map Visualization
+        st.markdown("**📍 Forecast Locations (Abia State)**")
+        
+        # Prepare map data
+        map_data = []
+        for zone, coords in AGRICULTURAL_ZONES.items():
+            # Highlight selected zone with a slightly different color/size if possible (st.map is simple)
+            # For basic st.map, we just plot all points.
+            map_data.append({
+                "lat": coords["lat"],
+                "lon": coords["lon"],
+                "zone": zone,
+                "size": 20 if zone == selected_zone else 10,
+                "color": "#FF0000" if zone == selected_zone else "#0000FF" # Simple color diff logic
+            })
+        df_map = pd.DataFrame(map_data)
+        
+        # Display map
+        # Using st.map is the simplest way to get a nice OSM/Mapbox style interactive map
+        st.map(df_map, latitude="lat", longitude="lon", size="size", color="color", zoom=9, height=400)
+        
+    # Contextual Insight on Map + Wind
+    with st.expander("💡 Insights: Why compare Wind Direction with Location?"):
+        st.markdown("""
+        **Combining these two charts helps predict upcoming weather:**
+        
+        1.  **Geography Matters:** The map shows **Aba** is further South (closer to the Atlantic Ocean), while **Umuahia/Isuikwuato** are further North.
+        2.  **Wind Source:** The Wind Rose (Left) shows where the wind is blowing **FROM**.
+        3.  **The Connection in Abia State:**
+            -   **South-West Winds (SW):** Blow from the **Atlantic Ocean**. They usually bring **Moisture and Rain**.
+            -   **North-East Winds (NE):** Blow from the **Sahara Desert** (Harmattan). They usually bring **Dryness and Dust**.
+        
+        *Tip: If you see the Wind Rose pointing SW and you are in Aba, expect humid conditions. If it shifts to NE, expect dry air.*
+        """)
 
-        # Wind & Pressure Analysis
-        st.subheader("🌬️ Wind & Atmosphere Analysis")
-        if st.button("🔊 Listen to Wind Analysis"):
-             wind_text = generate_wind_summary(df_zone)
-             autoplay_audio(text_to_audio(wind_text))
-        st.caption("💡 Wind direction and pressure help predict upcoming weather changes. Falling pressure often means rain is coming.")
-        col_w1, col_w2 = st.columns(2)
+    # Pressure Trend (Moved to full width below)
+    st.markdown("---")
+    st.markdown("**Atmospheric Pressure Trend**")
+    fig_press = px.line(df_zone.tail(24), x=df_zone.tail(24).index, y="Pressure", markers=True)
+    fig_press.update_traces(line_color="#4FC3F7")
+    fig_press.update_layout(height=350, xaxis_title="Time", yaxis_title="hPa")
+    st.plotly_chart(fig_press, use_container_width=True)
+    
+    # Add detailed analysis below the charts
+    st.markdown("---")
+    st.markdown("### 📊 Detailed Analysis & Insights")
+    
+    col_analysis1, col_analysis2 = st.columns(2)
+    
+    with col_analysis1:
+        st.markdown("**🌬️ Wind Pattern Analysis**")
         
-        with col_w1:
-            # Wind Rose (Polar Scatter of recent 24h)
-            st.markdown(f"**Wind Direction (Last 24h) - {selected_zone}**")
-            
-            # Filter last 24h
-            df_wind = df_zone.tail(24)
-            
-            fig_wind = go.Figure()
-            fig_wind.add_trace(go.Scatterpolar(
-                r=df_wind["Wind_Speed"],
-                theta=df_wind["Wind_Direction"],
-                mode='markers',
-                marker=dict(
-                    color=df_wind["Wind_Speed"],
-                    colorscale='Viridis',
-                    size=10,
-                    showscale=True,
-                    colorbar=dict(title="Speed (m/s)")
-                ),
-                name='Wind'
-            ))
-            
-            fig_wind.update_layout(
-                polar=dict(
-                    radialaxis=dict(visible=True, range=[0, df_wind["Wind_Speed"].max() + 2]),
-                    angularaxis=dict(direction="clockwise")
-                ),
-                showlegend=False,
-                height=400,
-                margin=dict(l=40, r=40, t=30, b=30)
-            )
-            st.plotly_chart(fig_wind, use_container_width=True)
-
-        with col_w2:
-            # Zone Map Visualization
-            st.markdown("**📍 Forecast Locations (Abia State)**")
-            
-            # Prepare map data
-            map_data = []
-            for zone, coords in AGRICULTURAL_ZONES.items():
-                # Highlight selected zone with a slightly different color/size if possible (st.map is simple)
-                # For basic st.map, we just plot all points.
-                map_data.append({
-                    "lat": coords["lat"],
-                    "lon": coords["lon"],
-                    "zone": zone,
-                    "size": 20 if zone == selected_zone else 10,
-                    "color": "#FF0000" if zone == selected_zone else "#0000FF" # Simple color diff logic
-                })
-            df_map = pd.DataFrame(map_data)
-            
-            # Display map
-            # Using st.map is the simplest way to get a nice OSM/Mapbox style interactive map
-            st.map(df_map, latitude="lat", longitude="lon", size="size", color="color", zoom=9, height=400)
-            
-        # Contextual Insight on Map + Wind
-        with st.expander("💡 Insights: Why compare Wind Direction with Location?"):
-            st.markdown("""
-            **Combining these two charts helps predict upcoming weather:**
-            
-            1.  **Geography Matters:** The map shows **Aba** is further South (closer to the Atlantic Ocean), while **Umuahia/Isuikwuato** are further North.
-            2.  **Wind Source:** The Wind Rose (Left) shows where the wind is blowing **FROM**.
-            3.  **The Connection in Abia State:**
-                -   **South-West Winds (SW):** Blow from the **Atlantic Ocean**. They usually bring **Moisture and Rain**.
-                -   **North-East Winds (NE):** Blow from the **Sahara Desert** (Harmattan). They usually bring **Dryness and Dust**.
-            
-            *Tip: If you see the Wind Rose pointing SW and you are in Aba, expect humid conditions. If it shifts to NE, expect dry air.*
-            """)
-
-        # Pressure Trend (Moved to full width below)
-        st.markdown("---")
-        st.markdown("**Atmospheric Pressure Trend**")
-        fig_press = px.line(df_zone.tail(24), x=df_zone.tail(24).index, y="Pressure", markers=True)
-        fig_press.update_traces(line_color="#4FC3F7")
-        fig_press.update_layout(height=350, xaxis_title="Time", yaxis_title="hPa")
-        st.plotly_chart(fig_press, use_container_width=True)
+        # Calculate wind statistics
+        df_wind = df_zone.tail(24)
+        avg_speed = df_wind["Wind_Speed"].mean()
+        max_speed = df_wind["Wind_Speed"].max()
+        min_speed = df_wind["Wind_Speed"].min()
         
-        # Add detailed analysis below the charts
-        st.markdown("---")
-        st.markdown("### 📊 Detailed Analysis & Insights")
+        # Determine predominant direction
+        def get_cardinal_direction(degrees):
+            directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+            idx = int((degrees + 22.5) / 45) % 8
+            return directions[idx]
         
-        col_analysis1, col_analysis2 = st.columns(2)
+        cardinal_dirs = [get_cardinal_direction(d) for d in df_wind["Wind_Direction"].values]
+        from collections import Counter
+        most_common = Counter(cardinal_dirs).most_common(2)
+        predominant_dir = most_common[0][0] if most_common else "Variable"
+        predominant_pct = (most_common[0][1] / len(cardinal_dirs) * 100) if most_common else 0
         
-        with col_analysis1:
-            st.markdown("**🌬️ Wind Pattern Analysis**")
-            
-            # Calculate wind statistics
-            df_wind = df_zone.tail(24)
-            avg_speed = df_wind["Wind_Speed"].mean()
-            max_speed = df_wind["Wind_Speed"].max()
-            min_speed = df_wind["Wind_Speed"].min()
-            
-            # Determine predominant direction
-            def get_cardinal_direction(degrees):
-                directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-                idx = int((degrees + 22.5) / 45) % 8
-                return directions[idx]
-            
-            cardinal_dirs = [get_cardinal_direction(d) for d in df_wind["Wind_Direction"].values]
-            from collections import Counter
-            most_common = Counter(cardinal_dirs).most_common(2)
-            predominant_dir = most_common[0][0] if most_common else "Variable"
-            predominant_pct = (most_common[0][1] / len(cardinal_dirs) * 100) if most_common else 0
-            
-            st.write(f"**Wind Statistics (Last 24h):**")
-            st.write(f"- Predominant Direction: **{predominant_dir}** ({predominant_pct:.0f}% of time)")
-            st.write(f"- Average Speed: **{avg_speed:.1f} m/s**")
-            st.write(f"- Speed Range: {min_speed:.1f} - {max_speed:.1f} m/s")
-            
-            # Wind consistency
-            speed_std = df_wind["Wind_Speed"].std()
-            if speed_std < 1:
-                consistency = "Very Consistent"
-                consistency_icon = "✅"
-            elif speed_std < 2:
-                consistency = "Moderately Consistent"
-                consistency_icon = "🔄"
-            else:
-                consistency = "Variable"
-                consistency_icon = "⚠️"
-            
-            st.write(f"- Wind Consistency: {consistency_icon} **{consistency}**")
-            
-            # Farming implications
-            st.markdown("**🌾 Farming Implications:**")
-            
-            if avg_speed > 7:
-                st.error("🌪️ **Very High Winds** - Avoid all field work. Risk of crop damage and soil erosion.")
-            elif avg_speed > 5:
-                st.warning("💨 **High Winds** - Not suitable for spraying. Delay pesticide/herbicide application.")
-            elif avg_speed >= 2 and avg_speed <= 5:
-                st.success("✅ **Ideal Winds** - Good air circulation reduces disease risk. Suitable for most farm activities.")
-            else:
-                st.info("🍃 **Light Winds** - Excellent for spraying. Minimal drift risk.")
-            
-            # Direction-based weather prediction
-            if predominant_dir in ['E', 'SE', 'S', 'SW']:
-                st.info(f"💧 **{predominant_dir} winds** typically bring moisture from the ocean. Monitor for potential rainfall.")
-            elif predominant_dir in ['N', 'NE', 'NW']:
-                st.info(f"🌤️ **{predominant_dir} winds** usually bring drier, cooler air. Expect clearer conditions.")
-            elif predominant_dir == 'W':
-                st.info(f"⛅ **{predominant_dir} winds** can bring variable weather. Stay alert to changes.")
+        st.write(f"**Wind Statistics (Last 24h):**")
+        st.write(f"- Predominant Direction: **{predominant_dir}** ({predominant_pct:.0f}% of time)")
+        st.write(f"- Average Speed: **{avg_speed:.1f} m/s**")
+        st.write(f"- Speed Range: {min_speed:.1f} - {max_speed:.1f} m/s")
         
-        with col_analysis2:
-            st.markdown("**🌡️ Atmospheric Pressure Analysis**")
-            
-            # Pressure statistics
-            current_pressure = df_zone["Pressure"].iloc[-1]
-            pressure_24h_ago = df_zone["Pressure"].iloc[-24] if len(df_zone) >= 24 else df_zone["Pressure"].iloc[0]
-            pressure_change_24h = current_pressure - pressure_24h_ago
-            
-            # Calculate 6-hour trend
-            if len(df_zone) >= 6:
-                pressure_6h_ago = df_zone["Pressure"].iloc[-6]
-                pressure_change_6h = current_pressure - pressure_6h_ago
-                trend_6h = "Rising" if pressure_change_6h > 0.5 else "Falling" if pressure_change_6h < -0.5 else "Stable"
-            else:
-                pressure_change_6h = 0
-                trend_6h = "Insufficient data"
-            
-            st.write(f"**Pressure Metrics:**")
-            st.write(f"- Current: **{current_pressure:.1f} hPa**")
-            st.write(f"- 24h Change: **{pressure_change_24h:+.1f} hPa**")
-            st.write(f"- 6h Trend: **{trend_6h}** ({pressure_change_6h:+.1f} hPa)")
-            
-            # Pressure classification
-            if current_pressure < 1000:
-                pressure_class = "Low Pressure System"
-                pressure_icon = "🌧️"
-            elif current_pressure > 1020:
-                pressure_class = "High Pressure System"
-                pressure_icon = "☀️"
-            else:
-                pressure_class = "Normal Pressure"
-                pressure_icon = "⛅"
-            
-            st.write(f"- System Type: {pressure_icon} **{pressure_class}**")
-            
-            # Weather prediction
-            st.markdown("**🔮 Weather Forecast:**")
-            
-            if pressure_change_24h < -5:
-                st.error("⛈️ **Rapidly Falling** - Severe weather likely! Expect heavy rain or storms within 12-24 hours.")
-                st.write("**Actions:** Secure equipment, check drainage, postpone all field work.")
-            elif pressure_change_24h < -2:
-                st.warning("🌧️ **Falling Pressure** - Weather deteriorating. Rain expected within 24-48 hours.")
-                st.write("**Actions:** Complete urgent outdoor tasks, prepare for wet conditions.")
-            elif pressure_change_24h > 5:
-                st.success("🌤️ **Rapidly Rising** - Weather clearing quickly! Expect sunny, dry conditions.")
-                st.write("**Actions:** Excellent time for harvesting, spraying, and field work.")
-            elif pressure_change_24h > 2:
-                st.success("☀️ **Rising Pressure** - Weather improving. Conditions becoming more stable.")
-                st.write("**Actions:** Good time to plan outdoor activities.")
-            else:
-                st.info("➡️ **Stable Pressure** - Weather conditions steady. No major changes expected.")
-                st.write("**Actions:** Continue normal farm operations.")
-            
-            # Additional context
-            if current_pressure < 995:
-                st.caption("⚠️ Very low pressure - associated with storms and heavy rainfall.")
-            elif current_pressure > 1025:
-                st.caption("ℹ️ Very high pressure - associated with clear skies and dry weather.")
+        # Wind consistency
+        speed_std = df_wind["Wind_Speed"].std()
+        if speed_std < 1:
+            consistency = "Very Consistent"
+            consistency_icon = "✅"
+        elif speed_std < 2:
+            consistency = "Moderately Consistent"
+            consistency_icon = "🔄"
+        else:
+            consistency = "Variable"
+            consistency_icon = "⚠️"
+        
+        st.write(f"- Wind Consistency: {consistency_icon} **{consistency}**")
+        
+        # Farming implications
+        st.markdown("**🌾 Farming Implications:**")
+        
+        if avg_speed > 7:
+            st.error("🌪️ **Very High Winds** - Avoid all field work. Risk of crop damage and soil erosion.")
+        elif avg_speed > 5:
+            st.warning("💨 **High Winds** - Not suitable for spraying. Delay pesticide/herbicide application.")
+        elif avg_speed >= 2 and avg_speed <= 5:
+            st.success("✅ **Ideal Winds** - Good air circulation reduces disease risk. Suitable for most farm activities.")
+        else:
+            st.info("🍃 **Light Winds** - Excellent for spraying. Minimal drift risk.")
+        
+        # Direction-based weather prediction
+        if predominant_dir in ['E', 'SE', 'S', 'SW']:
+            st.info(f"💧 **{predominant_dir} winds** typically bring moisture from the ocean. Monitor for potential rainfall.")
+        elif predominant_dir in ['N', 'NE', 'NW']:
+            st.info(f"🌤️ **{predominant_dir} winds** usually bring drier, cooler air. Expect clearer conditions.")
+        elif predominant_dir == 'W':
+            st.info(f"⛅ **{predominant_dir} winds** can bring variable weather. Stay alert to changes.")
+    
+    with col_analysis2:
+        st.markdown("**🌡️ Atmospheric Pressure Analysis**")
+        
+        # Pressure statistics
+        current_pressure = df_zone["Pressure"].iloc[-1]
+        pressure_24h_ago = df_zone["Pressure"].iloc[-24] if len(df_zone) >= 24 else df_zone["Pressure"].iloc[0]
+        pressure_change_24h = current_pressure - pressure_24h_ago
+        
+        # Calculate 6-hour trend
+        if len(df_zone) >= 6:
+            pressure_6h_ago = df_zone["Pressure"].iloc[-6]
+            pressure_change_6h = current_pressure - pressure_6h_ago
+            trend_6h = "Rising" if pressure_change_6h > 0.5 else "Falling" if pressure_change_6h < -0.5 else "Stable"
+        else:
+            pressure_change_6h = 0
+            trend_6h = "Insufficient data"
+        
+        st.write(f"**Pressure Metrics:**")
+        st.write(f"- Current: **{current_pressure:.1f} hPa**")
+        st.write(f"- 24h Change: **{pressure_change_24h:+.1f} hPa**")
+        st.write(f"- 6h Trend: **{trend_6h}** ({pressure_change_6h:+.1f} hPa)")
+        
+        # Pressure classification
+        if current_pressure < 1000:
+            pressure_class = "Low Pressure System"
+            pressure_icon = "🌧️"
+        elif current_pressure > 1020:
+            pressure_class = "High Pressure System"
+            pressure_icon = "☀️"
+        else:
+            pressure_class = "Normal Pressure"
+            pressure_icon = "⛅"
+        
+        st.write(f"- System Type: {pressure_icon} **{pressure_class}**")
+        
+        # Weather prediction
+        st.markdown("**🔮 Weather Forecast:**")
+        
+        if pressure_change_24h < -5:
+            st.error("⛈️ **Rapidly Falling** - Severe weather likely! Expect heavy rain or storms within 12-24 hours.")
+            st.write("**Actions:** Secure equipment, check drainage, postpone all field work.")
+        elif pressure_change_24h < -2:
+            st.warning("🌧️ **Falling Pressure** - Weather deteriorating. Rain expected within 24-48 hours.")
+            st.write("**Actions:** Complete urgent outdoor tasks, prepare for wet conditions.")
+        elif pressure_change_24h > 5:
+            st.success("🌤️ **Rapidly Rising** - Weather clearing quickly! Expect sunny, dry conditions.")
+            st.write("**Actions:** Excellent time for harvesting, spraying, and field work.")
+        elif pressure_change_24h > 2:
+            st.success("☀️ **Rising Pressure** - Weather improving. Conditions becoming more stable.")
+            st.write("**Actions:** Good time to plan outdoor activities.")
+        else:
+            st.info("➡️ **Stable Pressure** - Weather conditions steady. No major changes expected.")
+            st.write("**Actions:** Continue normal farm operations.")
+        
+        # Additional context
+        if current_pressure < 995:
+            st.caption("⚠️ Very low pressure - associated with storms and heavy rainfall.")
+        elif current_pressure > 1025:
+            st.caption("ℹ️ Very high pressure - associated with clear skies and dry weather.")
 
 # --- TAB 2: Weather Forecast (Enhanced to match screenshot) ---
 with tab2:

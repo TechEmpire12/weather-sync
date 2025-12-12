@@ -8,9 +8,28 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+
+def get_secret(key, default=None):
+    """Retrieve secret from environment variable or Streamlit secrets."""
+    # 1. Try Environment Variable (Local .env or CI)
+    val = os.getenv(key)
+    if val:
+        return val
+    
+    # 2. Try Streamlit Secrets (Streamlit Cloud)
+    try:
+        import streamlit as st
+        # secrets behaves like a dict but might raise if not configured or file missing
+        if hasattr(st, "secrets") and key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+        
+    return default
+
 # --- Security: Load API Key from Environment Variable ---
 # This prevents hardcoding sensitive credentials in source code
-API_KEY = os.getenv("OPENWEATHER_API_KEY", "411a686a21f617a1d849b7ab15c352d9")
+API_KEY = get_secret("OPENWEATHER_API_KEY", "411a686a21f617a1d849b7ab15c352d9")
 
 if not API_KEY:
     raise ValueError(
@@ -19,8 +38,8 @@ if not API_KEY:
     )
 
 # --- Supabase Configuration ---
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = get_secret("SUPABASE_URL")
+SUPABASE_KEY = get_secret("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     # Warning instead of Error for now, to allow partial functionality
@@ -38,17 +57,17 @@ def init_supabase():
         return None
 
 # --- SMS Configuration (Termii) ---
-TERMII_API_KEY = os.getenv("TERMII_API_KEY")
-TERMII_SENDER_ID = os.getenv("TERMII_SENDER_ID", "N-Alert") # Default or requested Sender ID
+TERMII_API_KEY = get_secret("TERMII_API_KEY")
+TERMII_SENDER_ID = get_secret("TERMII_SENDER_ID", "N-Alert") # Default or requested Sender ID
 TERMII_BASE_URL = "https://api.ng.termii.com/api"
 TERMII_BASE_URL = "https://api.ng.termii.com/api"
 
 # --- Email Configuration (SMTP) ---
 # --- Email Configuration (SMTP) ---
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.office365.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_EMAIL = os.getenv("SMTP_EMAIL")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_SERVER = get_secret("SMTP_SERVER", "smtp.office365.com")
+SMTP_PORT = int(get_secret("SMTP_PORT", "587"))
+SMTP_EMAIL = get_secret("SMTP_EMAIL")
+SMTP_PASSWORD = get_secret("SMTP_PASSWORD")
 
 # --- Agricultural Zones Configuration ---
 # Coordinates are crucial for API calls
