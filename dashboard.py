@@ -949,7 +949,7 @@ with col_nav3:
     date_range = st.selectbox(
         "Select Timeframe:",
         ["Last 24 Hours", "Last 7 Days", "Last 30 Days", "Last 90 Days", "All Data"],
-        index=3,
+        index=0,
         key="date_range"
     )
 st.markdown("</div>", unsafe_allow_html=True)
@@ -963,6 +963,10 @@ if not isinstance(df_zone.index, pd.DatetimeIndex):
     df_zone.index = pd.to_datetime(df_zone.index)
 
 df_zone.sort_index(inplace=True)
+
+# Keep a copy of the full zone data for correctly calculating long-term stats (30d/90d)
+# independent of the viewing timeframe selected by the user.
+df_zone_full = df_zone.copy()
 
 if date_range == "Last 24 Hours":
     df_zone = df_zone.last("24h")
@@ -1214,6 +1218,12 @@ with tab1:
 
     # Statistics
     stats = calculate_statistics(df_zone)
+    
+    # Fix: Ensure 30d/90d rain totals use full history regardless of timeframe selection
+    if stats and not df_zone_full.empty:
+         stats_full = calculate_statistics(df_zone_full)
+         stats['total_rain_30d'] = stats_full['total_rain_30d']
+         stats['total_rain_90d'] = stats_full['total_rain_90d']
 
     if stats:
         st.subheader("📈 Statistical Summary")
