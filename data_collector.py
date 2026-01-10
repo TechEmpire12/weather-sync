@@ -218,7 +218,11 @@ class WeatherDataCollector:
                 supabase_records.append(new_r)
 
             response = self.supabase.table("weather_data").insert(supabase_records).execute()
-            logger.info(f"Successfully pushed {len(records)} records to Supabase")
+            
+            if response.data:
+                logger.info(f"Successfully pushed {len(response.data)} records to Supabase")
+            else:
+                logger.warning("Supabase insert returned no data (possible RLS policy issue?)")
         except Exception as e:
             logger.error(f"Error pushing to Supabase: {e}")
 

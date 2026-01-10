@@ -25,7 +25,9 @@ from config import (
     EXTREME_TEMP_LOW,
     API_KEY,
     AGRICULTURAL_ZONES,
+    AGRICULTURAL_ZONES,
     API_TIMEOUT,
+    WEATHER_API_URL,
     FORECAST_API_URL,
     SUPABASE_URL,
     SUPABASE_KEY,
@@ -395,61 +397,65 @@ def get_weather_emoji(weather_condition):
     return weather_emojis.get(weather_condition, "🌤️")
 
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=200)  # Cache for minute (Changed to force reload)
 def load_data():
-    """Loads, cleans, and preprocesses weather data from both Supabase and local archive."""
+    """Loads, cleans, and preproceesses weather data from both Supabase and local archive."""
     df_supabase = pd.DataFrame()
     df_local = pd.DataFrame()
 
     # 1. Try Loading from Supabase
     if SUPABASE_URL and SUPABASE_KEY and create_client:
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            response = supabase.table("weather_data").select("*").execute()
-            
-            if response.data:
-                df_supabase = pd.DataFrame(response.data)
+        for attempt in range(3): # Retry logic (3 attempts)
+            try:
+                supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+                response = supabase.table("weather_data").select("*").execute()
                 
-                # --- DATA CLEANING STEP 1: Standardization ---
-                # Rename columns to standard Schema
-                column_map = {
-                    "timestamp": "Timestamp",
-                    "zone": "Zone",
-                    "t_current": "T_current",
-                    "t_min": "T_min",
-                    "t_max": "T_max",
-                    "feels_like": "Feels_Like",
-                    "humidity": "Humidity",
-                    "pressure": "Pressure",
-                    "wind_speed": "Wind_Speed",
-                    "wind_direction": "Wind_Direction",
-                    "cloudiness": "Cloudiness",
-                    "precipitation_1h": "Precipitation_1h",
-                    "precipitation_3h": "Precipitation_3h",
-                    "weather_condition": "Weather_Condition",
-                    "weather_description": "Weather_Description",
-                    "visibility": "Visibility"
-                }
-                df_supabase.rename(columns=column_map, inplace=True)
-                
-                # Check for critical column "Timestamp"
-                if "Timestamp" in df_supabase.columns:
-                     df_supabase["Timestamp"] = pd.to_datetime(df_supabase["Timestamp"])
-                     # Ensure timezone-naive for compatibility
-                     if pd.api.types.is_datetime64_any_dtype(df_supabase["Timestamp"]):
-                        # Handle potential mixed bag or just convert
-                        # If it's already naive, this might error if we use tz_convert, so use tz_localize(None)
-                        # But first ensure it is dt accessible
-                        if df_supabase["Timestamp"].dt.tz is not None:
-                             df_supabase["Timestamp"] = df_supabase["Timestamp"].dt.tz_localize(None)
-                     
-                     df_supabase.set_index("Timestamp", inplace=True)
+                if response.data:
+                    df_supabase = pd.DataFrame(response.data)
+                    
+                    # --- DATA CLEANING STEP 1: Standardization ---
+                    # Rename columns to standard Schema
+                    column_map = {
+                        "timestamp": "Timestamp",
+                        "zone": "Zone",
+                        "t_current": "T_current",
+                        "t_min": "T_min",
+                        "t_max": "T_max",
+                        "feels_like": "Feels_Like",
+                        "humidity": "Humidity",
+                        "pressure": "Pressure",
+                        "wind_speed": "Wind_Speed",
+                        "wind_direction": "Wind_Direction",
+                        "cloudiness": "Cloudiness",
+                        "precipitation_1h": "Precipitation_1h",
+                        "precipitation_3h": "Precipitation_3h",
+                        "weather_condition": "Weather_Condition",
+                        "weather_description": "Weather_Description",
+                        "visibility": "Visibility"
+                    }
+                    df_supabase.rename(columns=column_map, inplace=True)
+                    
+                    # Check for critical column "Timestamp"
+                    if "Timestamp" in df_supabase.columns:
+                         df_supabase["Timestamp"] = pd.to_datetime(df_supabase["Timestamp"])
+                         # Ensure timezone-naive for compatibility
+                         if pd.api.types.is_datetime64_any_dtype(df_supabase["Timestamp"]):
+                            # Handle potential mixed bag or just convert
+                            # If it's already naive, this might error if we use tz_convert, so use tz_localize(None)
+                            # But first ensure it is dt accessible
+                            if df_supabase["Timestamp"].dt.tz is not None:
+                                 df_supabase["Timestamp"] = df_supabase["Timestamp"].dt.tz_localize(None)
+                         
+                         df_supabase.set_index("Timestamp", inplace=True)
+                    else:
+                        st.warning("⚠️ Supabase data missing 'Timestamp' column.")
+                        df_supabase = pd.DataFrame() # Invalidate if structure is wrong
+                break # Success, exit retry loop
+            except Exception as e:
+                if attempt == 2: # Last attempt
+                    st.warning(f"⚠️ Could not load from Supabase after 3 attempts: {e}")
                 else:
-                    st.warning("⚠️ Supabase data missing 'Timestamp' column.")
-                    df_supabase = pd.DataFrame() # Invalidate if structure is wrong
-
-        except Exception as e:
-            st.warning(f"⚠️ Could not load from Supabase: {e}")
+                    pass # Retrying implicitly
 
     # 2. Try Loading from Local CSV
     if os.path.exists(DATA_ARCHIVE_FILE):
@@ -531,6 +537,12 @@ def load_data():
         df_combined.set_index("Timestamp", inplace=True)
         
         df_combined.sort_index(inplace=True)
+        
+        # --- DATA CLEANING STEP 5: Remove Future Data ---
+        # Historical data cannot be in the future. This prevents anomalies like
+        # "Jan 2026" appearing in charts when the current date is Dec 2025.
+        current_time = datetime.now()
+        df_combined = df_combined[df_combined.index <= current_time]
         
         return df_combined
 
@@ -949,7 +961,7 @@ with col_nav3:
     date_range = st.selectbox(
         "Select Timeframe:",
         ["Last 24 Hours", "Last 7 Days", "Last 30 Days", "Last 90 Days", "All Data"],
-        index=3,
+        index=0,
         key="date_range"
     )
 st.markdown("</div>", unsafe_allow_html=True)
@@ -964,14 +976,21 @@ if not isinstance(df_zone.index, pd.DatetimeIndex):
 
 df_zone.sort_index(inplace=True)
 
-if date_range == "Last 24 Hours":
-    df_zone = df_zone.last("24h")
-elif date_range == "Last 7 Days":
-    df_zone = df_zone.last("7D")
-elif date_range == "Last 30 Days":
-    df_zone = df_zone.last("30D")
-elif date_range == "Last 90 Days":
-    df_zone = df_zone.last("90D")
+# Keep a copy of the full zone data for correctly calculating long-term stats (30d/90d)
+# independent of the viewing timeframe selected by the user.
+df_zone_full = df_zone.copy()
+
+if not df_zone.empty:
+    last_timestamp = df_zone.index.max()
+    
+    if date_range == "Last 24 Hours":
+        df_zone = df_zone[df_zone.index >= (last_timestamp - pd.Timedelta(hours=24))]
+    elif date_range == "Last 7 Days":
+        df_zone = df_zone[df_zone.index >= (last_timestamp - pd.Timedelta(days=7))]
+    elif date_range == "Last 30 Days":
+        df_zone = df_zone[df_zone.index >= (last_timestamp - pd.Timedelta(days=30))]
+    elif date_range == "Last 90 Days":
+        df_zone = df_zone[df_zone.index >= (last_timestamp - pd.Timedelta(days=90))]
 
 # Removed sidebar info as it's cleaner without it, or move to bottom
 # st.sidebar.info(...) -> Removed
@@ -1214,6 +1233,12 @@ with tab1:
 
     # Statistics
     stats = calculate_statistics(df_zone)
+    
+    # Fix: Ensure 30d/90d rain totals use full history regardless of timeframe selection
+    if stats and not df_zone_full.empty:
+         stats_full = calculate_statistics(df_zone_full)
+         stats['total_rain_30d'] = stats_full['total_rain_30d']
+         stats['total_rain_90d'] = stats_full['total_rain_90d']
 
     if stats:
         st.subheader("📈 Statistical Summary")
@@ -1821,10 +1846,21 @@ with tab3:
         df_history.index = pd.to_datetime(df_history.index)
     
     df_history.sort_index(inplace=True)
+
+    # --- HISTORICAL DATA FILTER: Strict Force ---
+    # Explicitly filter out future data at the visualization level
+    current_time_vis = datetime.now()
+    df_history = df_history[df_history.index <= current_time_vis]
     
     if df_history.empty:
         st.warning("Insufficient data for trend analysis.")
     else:
+        # DEBUG: Show max date to diagnose "Jan 2026" issue
+        max_date = df_history.index.max()
+        st.caption(f"ℹ️ Data Range: {df_history.index.min().date()} to {max_date.date()}")
+        if max_date > datetime.now():
+            st.error(f"❌ Future data detected! Max Date: {max_date}")
+
         # 1. Monthly Rainfall Accumulation
         st.subheader("🌧️ Rainfall Accumulation Over Time")
         if st.button("🔊 Listen to Historical Rain"):
@@ -1857,7 +1893,6 @@ with tab3:
             monthly_rain = daily_filtered.resample("M").agg({
                 "Daily_Precipitation": "sum"
             })
-            
             if not monthly_rain.empty:
                 # Create DataFrame for plotting
                 rain_df = pd.DataFrame({
@@ -1865,6 +1900,12 @@ with tab3:
                     "Rainfall": monthly_rain["Daily_Precipitation"].values
                 })
                 
+                # --- FINAL SAFETY FILTER: Remove Future Months ---
+                # Use MonthEnd to keep the current month (even if incomplete) but remove subsequent months.
+                # Example: If Now is Dec 15, Cutoff is Dec 31. Jan 31 is filtered out.
+                cutoff_date = pd.Timestamp.now() + pd.tseries.offsets.MonthEnd(0)
+                rain_df = rain_df[rain_df["Date"] <= cutoff_date]
+
                 fig_monthly_rain = px.bar(
                     rain_df,
                     x="Date",
@@ -1881,6 +1922,10 @@ with tab3:
                 )
                 st.plotly_chart(fig_monthly_rain, use_container_width=True)
                 
+                # DEBUG: Inspect the data
+                with st.expander("🛠️ Debug Data: Monthly Rainfall"):
+                     st.dataframe(rain_df)
+
                 # Trend interpretation
                 if len(rain_df) > 3:
                     recent_avg = rain_df.tail(3)["Rainfall"].mean()
@@ -1925,6 +1970,9 @@ with tab3:
                         "Drought_Days": monthly_droughts.values
                     })
                     
+                    # --- FINAL SAFETY FILTER ---
+                    drought_df = drought_df[drought_df["Date"] <= datetime.now()]
+
                     fig_drought = px.line(
                         drought_df,
                         x="Date",
